@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply the closed-lid input workaround only during AnyDesk sessions
+After=systemd-udev-trigger.service anydesk.service
+ConditionPathExists=/sys/bus/platform/drivers/acpi-button/unbind
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/anydesk-input-delay-fix
+ExecStart=/usr/local/sbin/anydesk-input-delay-fix-watcher
+ExecStopPost=/usr/local/sbin/anydesk-input-delay-fix enable
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

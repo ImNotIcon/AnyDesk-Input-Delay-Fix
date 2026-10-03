@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+HELPER="${FIX_HELPER:-/usr/local/sbin/anydesk-input-delay-fix}"
+TRACE_FILE="${ANYDESK_TRACE_FILE:-}"
+
+restore_lid_switch()
+{
+    "$HELPER" enable
+}
+
+trap restore_lid_switch EXIT INT TERM HUP
+restore_lid_switch
+
+if [ -z "$TRACE_FILE" ]; then
+    while :; do
+        TRACE_FILE=$(find /home -mindepth 3 -maxdepth 3 \
+            -path '*/.anydesk/anydesk.trace' -type f \
+            -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f 2-)
+        [ -n "$TRACE_FILE" ] && break
+        sleep 2
+    done
+fi
+
+while [ ! -e "$TRACE_FILE" ]; do
+    sleep 2
+done
+
+last_marker=$(grep -E 'Session started \(ok\)\.|Session count: 0' "$TRACE_FILE" 2>/dev/null | tail -n 1 || true)
+case "$last_marker" in
+    *'Session started (ok).'*) "$HELPER" disable ;;
+    *)                           "$HELPER" enable ;;
+esac
+
+# Re-reading a few lines makes the state check and tail attachment race-safe.
+# Both helper actions are idempotent, so repeated lifecycle lines are harmless.
+tail -n 20 -F "$TRACE_FILE" | while IFS= read -r line; do
+    case "$line" in
+        *'Session started (ok).'*) "$HELPER" disable ;;
+        *'Session count: 0'*)      "$HELPER" enable ;;
+    esac
+done

@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+DEVICE="${LID_DEVICE:-PNP0C0D:00}"
+DEVICE_PATH="/sys/devices/platform/$DEVICE"
+DRIVER_PATH="/sys/bus/platform/drivers/acpi-button"
+
+case "${1:-}" in
+    disable)
+        # If the ACPI lid driver is already detached, there is nothing to do.
+        if [ -L "$DEVICE_PATH/driver" ]; then
+            echo "Unbinding lid switch $DEVICE for active AnyDesk session"
+            printf '%s' "$DEVICE" > "$DRIVER_PATH/unbind"
+        fi
+        ;;
+    enable)
+        # Reattach the lid switch when the service is stopped or uninstalled.
+        if [ ! -L "$DEVICE_PATH/driver" ] && [ -e "$DRIVER_PATH/bind" ]; then
+            echo "Rebinding lid switch $DEVICE after AnyDesk session"
+            printf '%s' "$DEVICE" > "$DRIVER_PATH/bind"
+        fi
+        ;;
+    status)
+        if [ -L "$DEVICE_PATH/driver" ]; then
+            echo "Lid switch is bound (workaround inactive)"
+        else
+            echo "Lid switch is unbound (workaround active)"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {disable|enable|status}" >&2
+        exit 2
+        ;;
+esac
