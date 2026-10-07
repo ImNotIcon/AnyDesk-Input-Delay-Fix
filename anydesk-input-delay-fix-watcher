@@ -1,42 +1,107 @@
-#!/bin/sh
-set -eu
+#!/bin/bash
+# Follow new trace bytes and validate events against live backend identities.
+set -euo pipefail
+export LC_ALL=C
 
-HELPER="${FIX_HELPER:-/usr/local/sbin/anydesk-input-delay-fix}"
-TRACE_FILE="${ANYDESK_TRACE_FILE:-}"
+helper=${FIX_HELPER:-/usr/local/sbin/anydesk-input-delay-fix}
+trace=${ANYDESK_TRACE_FILE:-}
+declare -A births=() sessions=()
+boot=$(awk '$1 == "btime" {print $2}' /proc/stat)
+ticks=$(getconf CLK_TCK)
+enabled=0
+inode=''
+offset=0
+pending=''
+fd=''
 
-restore_lid_switch()
-{
-    "$HELPER" enable
+trap 'exit 0' INT TERM HUP
+# systemd ExecStopPost owns restoration, including crashes and forced exits.
+
+refresh_backends() {
+    local pid record start arguments
+    local -a fields argv
+    births=()
+    while read -r pid; do
+        [[ -r /proc/$pid/stat && -r /proc/$pid/cmdline ]] || continue
+        argv=()
+        mapfile -d '' -t argv < "/proc/$pid/cmdline" || continue
+        [[ ${argv[0]##*/} == anydesk ]] || continue
+        arguments=" ${argv[*]} "
+        [[ $arguments == *' --backend '* ]] || continue
+        record=$(cat "/proc/$pid/stat" 2>/dev/null) || continue
+        read -r -a fields <<< "${record##*) }"
+        start=${fields[19]}
+        births[$pid]=$((boot * 1000 + start * 1000 / ticks))
+    done < <(pgrep -x anydesk || true)
+    for pid in "${!sessions[@]}"; do
+        if [[ ${births[$pid]:-} != "${sessions[$pid]}" ]]; then
+            unset 'sessions[$pid]'
+        fi
+    done
 }
 
-trap restore_lid_switch EXIT INT TERM HUP
-restore_lid_switch
-
-if [ -z "$TRACE_FILE" ]; then
-    while :; do
-        TRACE_FILE=$(find /home -mindepth 3 -maxdepth 3 \
-            -path '*/.anydesk/anydesk.trace' -type f \
-            -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f 2-)
-        [ -n "$TRACE_FILE" ] && break
-        sleep 2
-    done
-fi
-
-while [ ! -e "$TRACE_FILE" ]; do
-    sleep 2
-done
-
-last_marker=$(grep -E 'Session started \(ok\)\.|Session count: 0' "$TRACE_FILE" 2>/dev/null | tail -n 1 || true)
-case "$last_marker" in
-    *'Session started (ok).'*) "$HELPER" disable ;;
-    *)                           "$HELPER" enable ;;
-esac
-
-# Re-reading a few lines makes the state check and tail attachment race-safe.
-# Both helper actions are idempotent, so repeated lifecycle lines are harmless.
-tail -n 20 -F "$TRACE_FILE" | while IFS= read -r line; do
+consume_line() {
+    local line=$1 pid timestamp stamp active
     case "$line" in
-        *'Session started (ok).'*) "$HELPER" disable ;;
-        *'Session count: 0'*)      "$HELPER" enable ;;
+        *'Session started (ok).'*) active=1 ;;
+        *)
+            [[ $line =~ Session\ count:\ 0([^0-9]|$) ]] || return 0
+            active=0
+            ;;
     esac
+    # Trace timestamps are UTC. Accept backend markers only.
+    if [[ $line =~ ([0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+)[[:space:]]+backend[[:space:]]+[^[:space:]]+[[:space:]]+([0-9]+)[[:space:]]+[0-9]+ ]]; then
+        pid=${BASH_REMATCH[2]}
+        stamp=${BASH_REMATCH[1]}
+        [[ -n ${births[$pid]:-} ]] || return 0
+        timestamp=$(date -u -d "$stamp UTC" +%s%3N 2>/dev/null) || return 0
+        (( timestamp >= births[$pid] )) || return 0
+        if (( active )); then
+            sessions[$pid]=${births[$pid]}
+        else
+            unset 'sessions[$pid]'
+        fi
+    fi
+}
+
+read_updates() {
+    local identity size line
+    [[ -f $trace ]] || return 0
+    read -r identity size < <(stat -Lc '%d:%i %s' "$trace") || return 0
+    if [[ $identity != "$inode" ]] || (( size < offset )); then
+        if [[ -n $fd ]]; then exec {fd}<&-; fi
+        exec {fd}< "$trace"
+        inode=$identity
+        offset=0
+        pending=''
+    fi
+    while :; do
+        line=''
+        if IFS= read -r -u "$fd" line; then
+            offset=$((offset + ${#line} + 1))
+            consume_line "$pending$line"
+            pending=''
+        else
+            offset=$((offset + ${#line}))
+            pending+=$line
+            break
+        fi
+    done
+}
+
+"$helper" enable
+while :; do
+    refresh_backends
+    if [[ -z $trace ]]; then
+        trace=$(find /home -mindepth 3 -maxdepth 3 -path '*/.anydesk/anydesk.trace' \
+            -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | sed -n '1s/^[^ ]* //p')
+    fi
+    read_updates
+    active=0
+    if (( ${#sessions[@]} > 0 )); then active=1; fi
+    if (( active != enabled )); then
+        if (( active )); then "$helper" disable; else "$helper" enable; fi
+        enabled=$active
+    fi
+    sleep 1
 done

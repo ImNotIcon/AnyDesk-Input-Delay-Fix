@@ -15,9 +15,33 @@ case "${1:-}" in
         ;;
     enable)
         # Reattach the lid switch when the service is stopped or uninstalled.
-        if [ ! -L "$DEVICE_PATH/driver" ] && [ -e "$DRIVER_PATH/bind" ]; then
+        if [ -e "$DRIVER_PATH/bind" ]; then
+            # 'ignore' does not publish the physical state at driver probe.
+            # Temporarily use _LID evaluation so desktop consumers resync.
+            parameter=/sys/module/button/parameters/lid_init_state
+            previous=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$parameter")
+            if [ -z "$previous" ]; then
+                previous=$(cat "$parameter")
+            fi
+            trap 'printf "%s" "$previous" > "$parameter"' EXIT
+            printf method > "$parameter"
+            if [ -L "$DEVICE_PATH/driver" ]; then
+                printf '%s' "$DEVICE" > "$DRIVER_PATH/unbind"
+            fi
             echo "Rebinding lid switch $DEVICE after AnyDesk session"
             printf '%s' "$DEVICE" > "$DRIVER_PATH/bind"
+            # UPower can retain the last state of a removed input device even
+            # when the replacement publishes the correct initial state.
+            sleep 1
+            physical=$(sed -n 's/.*state:[[:space:]]*//p' /proc/acpi/button/lid/*/state)
+            cached=$(busctl get-property org.freedesktop.UPower /org/freedesktop/UPower \
+                org.freedesktop.UPower LidIsClosed 2>/dev/null || true)
+            case "$physical:$cached" in
+                'open:b true'|'closed:b false')
+                    echo "UPower lid cache disagrees with ACPI ($physical); restarting UPower"
+                    systemctl restart upower.service
+                    ;;
+            esac
         fi
         ;;
     status)
