@@ -25,6 +25,8 @@ desktop components did not resolve the symptom.
 The Bash watcher validates backend log PIDs against live `/proc` process start
 times. It reconstructs sessions from the trace at startup, then reads only new
 bytes using an open descriptor. Incomplete lines are retained between polls.
+Both `backend` and `back` trace component labels are accepted; a change to the
+shorter label was observed to prevent the original parser detecting sessions.
 File replacement or detectable truncation reopens the trace. States survive log
 rotation until a disconnect marker or backend exit clears them. A truncate and
 regrow beyond the old offset between polls cannot reliably be detected.
