@@ -25,6 +25,10 @@ desktop components did not resolve the symptom.
 The Bash watcher validates backend log PIDs against live `/proc` process start
 times. It reconstructs sessions from the trace at startup, then reads only new
 bytes using an open descriptor. Incomplete lines are retained between polls.
+The boot-time reference is refreshed on each poll. If clock synchronization
+changes it, session state is rebuilt from the trace using the corrected
+reference. Caching the pre-synchronization value previously caused valid
+sessions to be rejected after a two-hour backward clock correction at boot.
 Both `backend` and `back` trace component labels are accepted; a change to the
 shorter label was observed to prevent the original parser detecting sessions.
 File replacement or detectable truncation reopens the trace. States survive log

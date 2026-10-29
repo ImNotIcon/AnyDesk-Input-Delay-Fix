@@ -18,8 +18,16 @@ trap 'exit 0' INT TERM HUP
 # systemd ExecStopPost owns restoration, including crashes and forced exits.
 
 refresh_backends() {
-    local pid record start arguments
+    local pid record start arguments current_boot
     local -a fields argv
+    current_boot=$(awk '$1 == "btime" {print $2}' /proc/stat)
+    if [[ $current_boot != "$boot" ]]; then
+        echo "System clock reference changed; rebuilding AnyDesk session state"
+        boot=$current_boot
+        sessions=()
+        # Existing log timestamps must be checked against the corrected clock.
+        inode=''
+    fi
     births=()
     while read -r pid; do
         [[ -r /proc/$pid/stat && -r /proc/$pid/cmdline ]] || continue
